@@ -1,0 +1,150 @@
+---
+title: "Project"
+author: "Giulio Pecile"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=F}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidymodels)
+library(tidyverse)
+library(ggthemes)
+library(maps)
+library(spatialsample)
+```
+
+## Data import
+
+Per prima cosa qui carico i dati che ho scaricato, i dati del terreno e scarico una mappa dell'Italia. 
+Faccio una leggera pulizia dei dati e rinomino alcune colonne. Faccio un plot di dove sono i vigneti sulla mappa. 
+
+Un'altra cosa importante è stato fare pivot_wide il database. In questo modo ho una sola osservazione per coppia di coordinate (in alcune ce ne sono due strette in una sola riga, bisogna decidere che farne). Questo ci permetterà di fare più facilmente delle joins con gli altri dataset che abbiamo e applicare in modo più sicuro una dimensionality reduction sul numero delle colonne. In particolare abbiamo 2 colonne di lat e long, la colonna id e 200 giorni * 21 variabili misurate ogni giorno, per un totale di 4203 colonne.
+
+```{r, results = 'hide', message=FALSE, warning=FALSE}
+
+data <- read_csv('meteo/166040.csv')
+data <- data %>% mutate(
+  id = 166040
+)
+files <- list.files(path = "meteo/")
+for(file in files[-1]){   # 166040 è il primo file, quindi lo escludo
+  path <- 'meteo/'
+  path <- paste(path, file, sep='')
+  new <- read_csv(path)
+  new <- new %>% mutate(id = as.numeric(str_remove(file, ".csv")))
+  data <- rbind(data, new)
+  rm(new)
+  }
+
+fixtime <- function(t){
+  t <- as.character(t)
+  vec <- unlist(str_split(t, '-'))
+  paste(vec[3], vec[2], sep = '.')
+}
+
+data <- data %>%
+  select(-c(stations, severerisk, precipprob, preciptype,
+            snow, snowdepth, description, conditions, windgust, icon))%>%
+  separate(
+    name, c('lat', 'long'), sep= ','
+  ) %>%
+  mutate(
+    across(c(lat, long), as.numeric),
+    datetime = Vectorize(fixtime)(datetime)) %>%
+  pivot_wider(
+    names_from = datetime,
+    names_glue = "{.value}_{datetime}",
+    values_from = tempmax:moonphase
+  )
+
+
+Italy <- map_data('italy', region= '.', exact= F)
+
+ggplot(Italy, aes(long, lat))+
+  geom_polygon(aes(group = group, ), fill = '#4E84C4') +
+  coord_map("albers",  lat0 = 45.5, lat1 = 29.5)+
+  geom_point(data = data, aes(x=long, y=lat), size=1, color = 'orange')
+```
+
+Qui sotto invece pulisco il dataset data_soil e plotto tutti i vigneti sulla mappa
+
+
+```{r, results = 'hide', message=FALSE}
+mean_tilde <- function(word){
+  if(is.na(word)) return(NA)
+  if(!str_detect(word, '~')) return(as.numeric(word))
+  vec <- as.numeric(unlist(str_split(word, '~')))
+  return(mean(vec))
+}
+
+all <- read_csv('soil_data.csv')
+all <- dplyr::rename(all, long = longitudine, lat = latitudine)
+all <- all %>%
+  select(-(varieties4:varieties12), -(local1:local4), -nation) %>%
+  mutate(
+    sweet   = as.integer(str_replace(sweet, 'SWEET', '')),
+    acidity = as.integer(str_replace(acidity, 'ACIDITY', '')),
+    body    = as.integer(str_replace(body, 'BODY', '')),
+    tannin  = as.integer(str_replace(tannin, 'TANNIN', '')),
+    price = ifelse(price == 0, NA, price),
+    year = ifelse(year == 0, NA, year),
+    abv = Vectorize(mean_tilde)(abv),
+    degree = Vectorize(mean_tilde)(degree)
+  )
+
+ggplot(Italy, aes(long, lat))+
+  geom_polygon(aes(group = group, ), fill = '#4E84C4') +
+  coord_map("albers",  lat0 = 45.5, lat1 = 29.5)+
+  geom_point(data = all, aes(x=long, y=lat), size=.5, color = 'orange')
+
+```
+
+Continuando sull'idea della posizione dei vigneti, faccio una lista delle province e guardo quanti vigneti siano presenti in quali zone
+
+```{r, fig.show='hide'}
+all <- all %>%
+  mutate(
+    region = as.factor(map.where(maps::map('italy', fill = TRUE), long, lat)),
+  )
+all$region[is.na(all$region)] <- 'Gorizia' # Was too close to the border
+all %>% group_by(region) %>% count() %>% arrange(desc(n)) %>% print()
+```
+
+Infine, si fa una join per combinare il dataset del meteo con quello del terreno.
+
+```{r}
+all <- left_join(all, data)
+```
+
+
+## Spatial sampling
+
+A causa del fenomeno di autocorrelazione spaziale [$\sim$ cose vicine fisicamente hanno proprietà vicine] non possiamo semplicemente prendere dati random da assegnare ai folds. Si può dunque utilizzare la libreria ```spatial sample```, che permette di fare uno split migliore. 
+
+
+```{r pressure, echo=FALSE}
+good_folds <- spatial_clustering_cv(all, coords = c("lat", "long"), v = 5)
+plot_splits <- function(split) {
+  p <- bind_rows(
+    analysis(split) %>%
+      mutate(analysis = "Analysis"),
+    assessment(split) %>%
+      mutate(analysis = "Assessment")
+  ) %>%
+    ggplot(aes(long, lat, color = analysis)) +
+    geom_point(size = 1.5, alpha = 0.8) +
+    coord_fixed() +
+    labs(color = NULL)
+  print(p)
+}
+walk(good_folds$splits, plot_splits)
+```
+
+
+## Data inspection
+
+Avendo molti pochi dati è importante riconoscere gli outliers e rimuoverli, in quanto avranno un effetto più forte sulla predizione. 
+
+Due importanti metodi per fare outliers detection sono svm e isolation forest
+
