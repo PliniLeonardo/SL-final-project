@@ -1,0 +1,166 @@
+---
+title: "Giulio"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 8, fig.height = 5)
+```
+
+
+
+```{r, include = FALSE, message= FALSE}
+library(tidymodels)
+library(tidyverse)
+library(viridis)
+path <- 'final_modifica2.csv'
+vini <- read.csv(path)
+```
+
+
+## Explore data
+
+Here we do a little pre-processing of our data and we do a PCA in order to see 5 main profiles of wines.
+
+```{r data exploration}
+mean_tilde <- function(word){
+  if(is.na(word)) return(NA)
+  if(!str_detect(word, '~')) return(as.numeric(word))
+  vec <- as.numeric(unlist(str_split(word, '~')))
+  return(mean(vec))
+}
+vini <- vini %>%
+  select(
+    !X
+  ) %>%
+  mutate(
+    price = ifelse(price == 0, NA, price),
+    year = ifelse(year == 0, NA, year),
+    abv = Vectorize(mean_tilde)(abv),
+    degree = Vectorize(mean_tilde)(degree)
+  ) %>%
+  filter(
+    tempmax > 0
+  )
+
+pca_rec <- na.omit(vini) %>%
+  recipe(score~., data = .) %>%
+  update_role(name, id = "id") %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_pca(abv, degree, cec:uvindex)
+
+pca_prep <- prep(pca_rec)
+
+tidied_pca <- tidy(pca_prep, 2)
+
+
+```
+
+
+
+
+```{r, echo = F}
+tidied_pca %>%
+  filter(component %in% paste0("PC", 1:5)) %>%
+  mutate(component = fct_inorder(component)) %>%
+  ggplot(aes(value, terms, fill = terms)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~component, nrow = 1) +
+  labs(y = NULL)
+```
+
+```{r, echo = F} 
+juice(pca_prep) %>%
+  ggplot(aes(PC1, PC2, label = name)) +
+  geom_point(aes(color = score), alpha = 0.7, size = 2) +
+  geom_text(check_overlap = TRUE, hjust = "inward") +
+  labs(color = NULL)  + 
+  scale_color_viridis()+
+  scale_fill_viridis() 
+```
+
+
+
+
+## Build models
+
+```{r}
+set.seed(123)
+vini_split <- 
+  vini %>%
+  select(latitudine, longitudine, cec:score) %>%
+  na.omit() %>%
+  initial_split(., prop = .75, strata = score)
+vini_train <- training(vini_split)
+vini_test <- testing(vini_split)
+
+set.seed(234)
+vini_folds <- vfold_cv(vini_train, strata = score, v = 5)
+vini_folds
+```
+
+Let's create a [**model specification**](https://www.tmwr.org/models.html) for each model we want to try:
+
+```{r}
+lm_spec <-
+  linear_reg() %>% 
+  set_engine("lm")
+
+ranger_spec <-
+  rand_forest(trees = 1e3) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+```
+
+
+
+```{r}
+vini_formula <- score ~ .
+
+lm_wf    <- workflow(vini_formula, lm_spec)
+ranger_wf <- workflow(vini_formula, ranger_spec)
+```
+
+
+## Evaluate models
+
+
+```{r}
+contrl_preds <- control_resamples(save_pred = TRUE)
+
+lm_rs <- fit_resamples(
+  lm_wf,
+  resamples = vini_folds,
+  control = contrl_preds
+)
+
+ranger_rs <- fit_resamples(
+  ranger_wf,
+  resamples = vini_folds,
+  control = contrl_preds
+)
+```
+
+How did these two models compare?
+
+```{r}
+collect_metrics(lm_rs)
+collect_metrics(ranger_rs)
+```
+
+The random forest model performs slightly better...
+
+```{r}
+final_fitted <- last_fit(ranger_wf, vini_split)
+collect_metrics(final_fitted)  ## metrics evaluated on the *testing* data
+```
+
+This object contains a fitted workflow that we can use for prediction.
+
+```{r}
+final_wf <- extract_workflow(final_fitted)
+print(predict(final_wf, vini_test[1,]))
+print(vini_test$score[1])
+```
+
