@@ -73,8 +73,12 @@ vini <- vini %>%
     price = ifelse(price == 0, NA, price),
     year = ifelse(year == 0, NA, year),
     uvindex = ifelse(uvindex == 0, NA, uvindex),
+    solarenergy = ifelse(solarenergy == 0, NA, solarenergy),
+    solarradiation = ifelse(solarradiation == 0, NA, solarradiation),
     abv = Vectorize(mean_tilde)(abv),
     degree = Vectorize(mean_tilde)(degree),
+    degree = ifelse(degree==0, median(degree), degree),
+    year = as.factor(year),
   ) %>%
   filter(
     tempmax > 0
@@ -92,15 +96,17 @@ for(idx in seq_along(vini$id)) {
   }
 }
 
+
 pca_rec <- na.omit(vini) %>%
   recipe(score~., data = .) %>%
   update_role(name, id = "id") %>%
   step_normalize(all_numeric_predictors()) %>%
-  step_pca(abv, degree, cec:uvindex)
+  step_pca(abv:tannin, cec:uvindex, abv:tannin)
 
 pca_prep <- prep(pca_rec)
 
 tidied_pca <- tidy(pca_prep, 2)
+
 
 
 ```
@@ -135,7 +141,7 @@ juice(pca_prep) %>%
 set.seed(123)
 vini_split <- 
   vini %>%
-  select(latitudine, longitudine, cec:score) %>%
+  select(latitudine, longitudine, cec:uvindex, abv:tannin, year, price, score) %>%
   na.omit() %>%
   initial_split(., prop = .75, strata = score)
 vini_train <- training(vini_split)
@@ -146,12 +152,13 @@ vini_folds <- vfold_cv(vini_train, strata = score, v = 5)
 vini_folds
 ```
 
-Let's create a [**model specification**](https://www.tmwr.org/models.html) for each model we want to try:
+
 
 ```{r}
 lm_spec <-
   linear_reg() %>% 
   set_engine("lm")
+
 
 ranger_spec <-
   rand_forest(trees = 1e3) %>%
@@ -212,8 +219,5 @@ print(vini_test$score[1])
 ```
 
 
-```{r}
 
-
-```
 
