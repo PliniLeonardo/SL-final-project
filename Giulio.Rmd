@@ -14,8 +14,10 @@ knitr::opts_chunk$set(echo = TRUE, fig.width = 8, fig.height = 5)
 library(tidymodels)
 library(tidyverse)
 library(viridis)
-path <- 'final_modifica2.csv'
+library(stacks)
+path <- 'dati_vino_4.csv'
 vini <- read.csv(path)
+
 ```
 
 
@@ -30,19 +32,65 @@ mean_tilde <- function(word){
   vec <- as.numeric(unlist(str_split(word, '~')))
   return(mean(vec))
 }
+
+closest_uv <- function(tib, row){
+  id_ <- row$id
+  tib <- tib %>%
+    filter(!is.na(uvindex)) %>%
+    filter(id != id_) %>%
+    arrange(abs(latitudine-row$latitudine)+abs(longitudine-row$longitudine)) %>%
+    slice_head(n = 3)
+  val <- weighted.mean(tib$uvindex, c(0.95, 0.04, 0.01))
+  return(val)
+}
+closest_energy <- function(tib, row){
+  id_ <- row$id
+  tib <- tib %>%
+    filter(!is.na(solarenergy)) %>%
+    filter(id != id_) %>%
+    arrange(abs(latitudine-row$latitudine)+abs(longitudine-row$longitudine)) %>%
+    slice_head(n = 3)
+  val <- weighted.mean(tib$solarenergy, c(0.95, 0.04, 0.01))
+  return(val)
+}
+closest_radiation <- function(tib, row){
+  id_ <- row$id
+  tib <- tib %>%
+    filter(!is.na(solarradiation)) %>%
+    filter(id != id_) %>%
+    arrange(abs(latitudine-row$latitudine)+abs(longitudine-row$longitudine)) %>%
+    slice_head(n = 3)
+  val <- weighted.mean(tib$solarradiation, c(0.95, 0.04, 0.01))
+  return(val)
+}
+
+
 vini <- vini %>%
   select(
-    !X
+    !'Unnamed..0'
   ) %>%
   mutate(
     price = ifelse(price == 0, NA, price),
     year = ifelse(year == 0, NA, year),
+    uvindex = ifelse(uvindex == 0, NA, uvindex),
     abv = Vectorize(mean_tilde)(abv),
-    degree = Vectorize(mean_tilde)(degree)
+    degree = Vectorize(mean_tilde)(degree),
   ) %>%
   filter(
     tempmax > 0
   )
+
+for(idx in seq_along(vini$id)) {
+  if(is.na(vini$uvindex[idx])){
+    vini$uvindex[idx] = closest_uv(vini, vini[idx,])
+  }
+  if(is.na(vini$solarenergy[idx])){
+    vini$solarenergy[idx] = closest_energy(vini, vini[idx,])
+  }
+  if(is.na(vini$solarradiation[idx])){
+    vini$solarradiation[idx] = closest_radiation(vini, vini[idx,])
+  }
+}
 
 pca_rec <- na.omit(vini) %>%
   recipe(score~., data = .) %>%
@@ -59,7 +107,6 @@ tidied_pca <- tidy(pca_prep, 2)
 
 
 
-
 ```{r, echo = F}
 tidied_pca %>%
   filter(component %in% paste0("PC", 1:5)) %>%
@@ -72,9 +119,8 @@ tidied_pca %>%
 
 ```{r, echo = F} 
 juice(pca_prep) %>%
-  ggplot(aes(PC1, PC2, label = name)) +
+  ggplot(aes(PC1, PC2)) +
   geom_point(aes(color = score), alpha = 0.7, size = 2) +
-  geom_text(check_overlap = TRUE, hjust = "inward") +
   labs(color = NULL)  + 
   scale_color_viridis()+
   scale_fill_viridis() 
@@ -162,5 +208,12 @@ This object contains a fitted workflow that we can use for prediction.
 final_wf <- extract_workflow(final_fitted)
 print(predict(final_wf, vini_test[1,]))
 print(vini_test$score[1])
+
+```
+
+
+```{r}
+
+
 ```
 
