@@ -1,0 +1,240 @@
+---
+title: "speleologia"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+require(progress, quietly = T)
+require(ggplot2)
+require(data.table, quietly = T)
+require(kernlab, quietly = T)
+require(e1071, quietly = T)
+require(caret, quietly = T)
+require(randomForest, quietly = T)
+library(xgboost)
+library(tidymodels)
+library(tidyverse)
+library(viridis)
+library(stacks)
+library(vip)
+library(isotree)
+
+
+dataset = fread(file = "ahshitherewegoagain2.csv")
+data = dataset[,-'nation']
+data = data[,-'id']
+data = data[,-'producer']
+data = data[,-'name']
+data = data[,-'ml']
+data = data[,-'price']
+data = data[,-'year']
+data = data[,-'latitudine']
+data = data[,-'longitudine']
+data = data[,-'degree']
+data = data[,-(24:31)]
+data = data[,-'acidity']
+data = data[,-'sweet']
+data[,'local1'] = as.factor(data[['local1']])
+
+
+set.seed(420)
+iso <- isolation.forest(data[,-c('score')], ntrees = 10, nthreads = 1)
+
+### Check which row has the highest outlier score
+pred <- predict(iso, data[,-c('score')])
+
+data = data[which(pred <= 0.50), ]
+
+
+X = data[,-c('score')]
+y = data[,'score']
+
+
+
+
+train_idx = sample(1:dim(data)[1], replace = FALSE, size = floor(0.8 * dim(data)[1]))
+
+X_train = X[train_idx,]
+y_train = y[train_idx,]
+X_val = X[-train_idx,]
+y_val = y[-train_idx,]
+
+vini_train = data.frame(X_train, score = y_train)
+vini_test = data.frame(X_val, score = y_val)
+
+
+```
+
+
+
+```{r xgboost}
+
+
+xgboost_train = xgb.DMatrix(data=data.matrix(X_train), label=data.matrix(y_train))
+xgboost_val = xgb.DMatrix(data=data.matrix(X_val), label=data.matrix(y_val))
+
+
+
+xgboost_model = xgboost(data = xgboost_train, eta = 0.07, max.depth = 9, nrounds = 10000,
+                verbose = 0, early_stopping_rounds = 100, lambda = 0.7, min_child_weight = 1,
+                objective="reg:squarederror") 
+
+
+pred_val = predict(xgboost_model, xgboost_val)
+caret::RMSE(as.matrix(y_val), pred_val)
+
+
+```
+
+
+```{r}
+
+vini_folds <- vfold_cv(vini_train, strata = score, v = 5)
+contrl_preds <- control_resamples(save_pred = TRUE)
+vini_formula <- score ~ .
+
+
+lm_spec <-
+  linear_reg() %>% 
+  set_engine("lm")
+
+lm_wf    <- workflow(vini_formula, lm_spec)
+
+
+lm_rs <- fit_resamples(
+  lm_wf,
+  resamples = vini_folds,
+  control = contrl_preds
+)
+collect_metrics(lm_rs)
+
+lm_model <- fit(lm_wf, vini_train)
+
+
+ranger_spec <-
+  rand_forest(trees = 1e3) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+vini_formula <- score ~ .
+
+ranger_wf <- workflow(vini_formula, ranger_spec)
+
+ranger_rs <- fit_resamples(
+  ranger_wf,
+  resamples = vini_folds,
+  control = contrl_preds
+)
+collect_metrics(ranger_rs)
+
+
+
+
+
+rf_model <- fit(ranger_wf, vini_train)
+
+
+
+
+```
+```{r}
+
+prova = kpca( ~ ., data = data.frame(scale(X_train)), kernel = "rbfdot", kpar = list(sigma = 10), verbose = T)
+
+data_train = predict(prova, scale(X_train))
+
+svm_model = svm(score ~ .,data = data.frame(data_train, score = y_train), kernel = "linear")
+train_pred = predict( svm_model, data_train )
+caret::RMSE(train_pred, as.matrix(y_train))
+
+val_pred = predict(svm_model, predict(prova, scale(X_val)))
+caret::RMSE(val_pred, as.matrix(y_val))
+
+
+
+svm_model = svm(score ~ .,data = data.frame(X_train, score = y_train), kernel = "radial", gamma = 1)
+train_pred = predict( svm_model, X_train )
+caret::RMSE(train_pred, as.matrix(y_train))
+
+val_pred = predict(svm_model, X_val)
+caret::RMSE(val_pred, as.matrix(y_val))
+
+
+
+```
+
+
+
+
+
+```{r}
+
+
+
+library("iml")
+
+predictor <- Predictor$new(svm_model, data = X_train, y = y_train)
+
+imp <- FeatureImp$new(predictor, loss = "mae")
+
+plot(imp)
+
+
+ale <- FeatureEffect$new(predictor, feature = "sand")
+ale$plot()
+
+
+interact <- Interaction$new(predictor)
+plot(interact)
+
+
+
+interact <- Interaction$new(predictor, feature = "sand")
+plot(interact)
+
+
+
+
+effs <- FeatureEffects$new(predictor)
+plot(effs)
+
+
+
+tree <- TreeSurrogate$new(predictor, maxdepth = 2)
+plot(tree)
+
+```
+
+```{r}
+
+
+new_dataset = fread(file = "UNDICI.csv")
+new_data = new_dataset[,2:29]
+new_data = new_data[,-'Nation']
+new_data = new_data[,-'Producer']
+new_data = new_data[,-'Name']
+new_data = new_data[,-'year']
+new_data = new_data[,-'latitudine']
+new_data = new_data[,-'longitudine']
+new_data[,'local1'] = as.factor(new_data[['local1']], levels = levels(data[['local1']]))
+new_data[,'local1'] = c(new_data[,'local1'], data[,'local1'])[[2]][1:5]
+
+X_new = new_data[,-'score']
+y_new = new_data[,'score']
+
+lime.explain <- LocalModel$new(predictor, x.interest = X_new[1,])
+
+
+lime.explain$results
+
+plot(lime.explain)
+
+
+predict(svm_model, X_new)
+
+```
+
