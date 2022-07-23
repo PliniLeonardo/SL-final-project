@@ -15,7 +15,9 @@ library(tidymodels)
 library(tidyverse)
 library(viridis)
 library(stacks)
-path <- 'dati_vino_4.csv'
+library(maps)
+library(vip)
+path <- 'dati_vino_regioni.csv'
 vini <- read.csv(path)
 
 ```
@@ -66,9 +68,6 @@ closest_radiation <- function(tib, row){
 
 
 vini <- vini %>%
-  select(
-    !'Unnamed..0'
-  ) %>%
   mutate(
     price = ifelse(price == 0, NA, price),
     year = ifelse(year == 0, NA, year),
@@ -79,6 +78,7 @@ vini <- vini %>%
     degree = Vectorize(mean_tilde)(degree),
     degree = ifelse(degree==0, median(degree), degree),
     year = as.factor(year),
+    local1 = as.factor(local1)
   ) %>%
   filter(
     tempmax > 0
@@ -128,11 +128,56 @@ juice(pca_prep) %>%
   ggplot(aes(PC1, PC2)) +
   geom_point(aes(color = score), alpha = 0.7, size = 2) +
   labs(color = NULL)  + 
-  scale_color_viridis()+
+  scale_color_viridis(option="magma")+
   scale_fill_viridis() 
 ```
 
 
+The principal components don't offer much ordered view of our data and the score is pretty uniformly distributed. 
+
+Let's see if the spacial coordinated offer us a clearer view of what is happening.
+
+
+```{r, echo = F}
+
+Italy <- map_data('italy', region= '.', exact= F)
+
+ggplot(Italy, aes(long, lat))+
+  geom_polygon(aes(group = group, ), fill = '#4E84C4') +
+  coord_map("albers",  lat0 = 45.5, lat1 = 29.5)+
+  geom_point(data = vini, aes(x=longitudine, y=latitudine, color = score), size=1)+
+  scale_color_viridis(option="magma") +
+  scale_fill_viridis() 
+```
+
+
+Let's observe, in detail, how the most important features are distributed. Below, we have violin plots of chemical components found in the soil and of weather conditions
+
+```{r, echo = F}
+
+vini %>%
+  pivot_longer(cols=cec:silt,values_to = "obs", names_to = "grp") %>%
+  ggplot(aes(x=grp,y=obs, fill=grp))+
+  geom_violin()+
+  ggforce::geom_sina(alpha=0.5, size=.015)+
+  theme(legend.position="none")+
+  ggtitle('Violin plot of the chemical composition of the soil') +
+  xlab('Component') +
+  ylab('Observations')
+```
+
+```{r, echo = F}
+
+vini %>%
+  pivot_longer(cols=c(tempmax:humidity, windspeed, solarenergy, uvindex),values_to = "obs", names_to = "grp") %>%
+  ggplot(aes(x=grp,y=obs, fill=grp))+
+  geom_violin()+
+  ggforce::geom_sina(alpha=0.5, size=.015)+
+  theme(legend.position="none") +
+  ggtitle('Violin plot of the weather') +
+  xlab('Weather Variables') +
+  ylab('Observations')
+```
 
 
 ## Build models
@@ -215,7 +260,6 @@ This object contains a fitted workflow that we can use for prediction.
 final_wf <- extract_workflow(final_fitted)
 print(predict(final_wf, vini_test[1,]))
 print(vini_test$score[1])
-
 ```
 
 
