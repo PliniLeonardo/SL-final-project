@@ -23,6 +23,7 @@ library(viridis)
 library(stacks)
 library(vip)
 library(isotree)
+library(iml)
 
 
 dataset = fread(file = "ahshitherewegoagain2.csv")
@@ -68,6 +69,60 @@ vini_train = data.frame(X_train, score = y_train)
 vini_test = data.frame(X_val, score = y_val)
 
 
+vini_folds <- vfold_cv(vini_train, strata = score, v = 5)
+contrl_preds <- control_resamples(save_pred = TRUE)
+vini_formula <- score ~ .
+
+
+# nuovini
+new_dataset = fread(file = "prcmdnn.csv")
+new_data = new_dataset[,2:29]
+new_data = new_data[,-'Nation']
+new_data = new_data[,-'Producer']
+new_data = new_data[,-'Name']
+new_data = new_data[,-'year']
+new_data = new_data[,-'latitudine']
+new_data = new_data[,-'longitudine']
+new_data = new_data[, colnames(data), with = FALSE]
+new_data[,'local1'] = factor(new_data[['local1']], levels = levels(data[['local1']]))
+
+X_new = as.data.frame(new_data[,-'score'])
+X_new[,'local1'] = factor(X_new[['local1']], levels = levels(data[['local1']]))
+y_new = as.data.frame(new_data[,'score'])
+
+
+
+rec = recipe( vini_formula, data = data) %>%
+  step_normalize(all_numeric_predictors())
+
+rec2 = recipe( vini_formula, data = data) %>%
+  step_rm(contains("local1")) %>%
+  step_normalize(all_numeric_predictors())
+
+bootstraps = bootstraps(data)
+
+```
+
+
+
+
+
+
+
+
+
+
+```{r linear}
+
+lm_spec <-
+  linear_reg() %>% 
+  set_engine("lm")
+
+lm_wf    <- workflow() %>% add_model(lm_spec) %>% add_recipe(rec)
+
+lm_model <- fit(lm_wf, data)
+
+
 ```
 
 
@@ -75,98 +130,104 @@ vini_test = data.frame(X_val, score = y_val)
 ```{r xgboost}
 
 
-xgboost_train = xgb.DMatrix(data=data.matrix(X_train), label=data.matrix(y_train))
-xgboost_val = xgb.DMatrix(data=data.matrix(X_val), label=data.matrix(y_val))
+# tuning
+boost_spec <- boost_tree(
+                          mode = "regression",
+                          engine = "xgboost",
+                          mtry = tune(),
+                          trees = tune(),
+                          min_n = tune(),
+                          tree_depth = tune())
 
 
 
-xgboost_model = xgboost(data = xgboost_train, eta = 0.07, max.depth = 9, nrounds = 10000,
-                verbose = 0, early_stopping_rounds = 100, lambda = 0.7, min_child_weight = 1,
-                objective="reg:squarederror") 
+boost_wf    <- workflow() %>% add_model(boost_spec) %>% add_recipe(rec2)
+
+grid = tune_grid(boost_wf, resamples = bootstraps)
+
+show_best(grid, 'rmse')
 
 
-pred_val = predict(xgboost_model, xgboost_val)
-caret::RMSE(as.matrix(y_val), pred_val)
+# fit best model
+boost_spec <- boost_tree(
+                          mode = "regression",
+                          engine = "xgboost",
+                          mtry = select_best(grid, metric = 'rmse')$mtry,
+                          trees = select_best(grid, metric = 'rmse')$trees,
+                          min_n = select_best(grid, metric = 'rmse')$min_n,
+                          tree_depth = select_best(grid, metric = 'rmse')$tree_depth)
+
+boost_wf    <- workflow() %>% add_model(boost_spec) %>% add_recipe(rec2)
+
+xg_model <- fit(boost_wf, data)
+
 
 
 ```
 
 
-```{r}
+```{r random forest}
 
-vini_folds <- vfold_cv(vini_train, strata = score, v = 5)
-contrl_preds <- control_resamples(save_pred = TRUE)
-vini_formula <- score ~ .
-
-
-lm_spec <-
-  linear_reg() %>% 
-  set_engine("lm")
-
-lm_wf    <- workflow(vini_formula, lm_spec)
-
-
-lm_rs <- fit_resamples(
-  lm_wf,
-  resamples = vini_folds,
-  control = contrl_preds
-)
-collect_metrics(lm_rs)
-
-lm_model <- fit(lm_wf, vini_train)
-
-
+# tuning
 ranger_spec <-
-  rand_forest(trees = 1e3) %>%
+  rand_forest(trees = tune(), mtry = tune(), min_n = tune()) %>%
   set_engine("ranger") %>%
   set_mode("regression")
-vini_formula <- score ~ .
-
-ranger_wf <- workflow(vini_formula, ranger_spec)
-
-ranger_rs <- fit_resamples(
-  ranger_wf,
-  resamples = vini_folds,
-  control = contrl_preds
-)
-collect_metrics(ranger_rs)
 
 
+ranger_wf    <- workflow() %>% add_model(ranger_spec) %>% add_recipe(rec)
+
+grid = tune_grid(ranger_wf, resamples = bootstraps)
+
+show_best(grid, 'rmse')
 
 
+# fit best model
+ranger_spec <-
+  rand_forest(trees = select_best(grid, metric = 'rmse')$trees, mtry = select_best(grid, metric = 'rmse')$mtry, min_n = select_best(grid, metric = 'rmse')$min_n) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
 
-rf_model <- fit(ranger_wf, vini_train)
+ranger_wf    <- workflow() %>% add_model(ranger_spec) %>% add_recipe(rec)
 
-
-
-
-```
-```{r}
-
-prova = kpca( ~ ., data = data.frame(scale(X_train)), kernel = "rbfdot", kpar = list(sigma = 10), verbose = T)
-
-data_train = predict(prova, scale(X_train))
-
-svm_model = svm(score ~ .,data = data.frame(data_train, score = y_train), kernel = "linear")
-train_pred = predict( svm_model, data_train )
-caret::RMSE(train_pred, as.matrix(y_train))
-
-val_pred = predict(svm_model, predict(prova, scale(X_val)))
-caret::RMSE(val_pred, as.matrix(y_val))
-
-
-
-svm_model = svm(score ~ .,data = data.frame(X_train, score = y_train), kernel = "radial", gamma = 1)
-train_pred = predict( svm_model, X_train )
-caret::RMSE(train_pred, as.matrix(y_train))
-
-val_pred = predict(svm_model, X_val)
-caret::RMSE(val_pred, as.matrix(y_val))
-
+rf_model <- fit(ranger_wf, data)
 
 
 ```
 
+```{r radial svm}
+
+# tuning
+svm_spec <- svm_rbf(
+                    mode = "regression",
+                    engine = "kernlab",
+                    cost = tune(),
+                    rbf_sigma = tune(),
+                    margin = tune())
+
+
+svm_wf    <- workflow() %>% add_model(svm_spec) %>% add_recipe(rec2)
+
+grid = tune_grid(svm_wf, resamples = bootstraps)
+
+show_best(grid, 'rmse')
+
+
+# fit best model
+svm_spec <- svm_rbf(
+                    mode = "regression",
+                    engine = "kernlab",
+                    cost = select_best(grid, metric = 'rmse')$cost,
+                    rbf_sigma = select_best(grid, metric = 'rmse')$rbf_sigma,
+                    margin = select_best(grid, metric = 'rmse')$margin)
+
+
+svm_wf    <- workflow() %>% add_model(svm_spec) %>% add_recipe(rec2)
+
+svm_model <- fit(svm_wf, data)
+
+```
+
 
 
 
@@ -175,11 +236,9 @@ caret::RMSE(val_pred, as.matrix(y_val))
 
 
 
-library("iml")
+predictor <- Predictor$new(lm_model, data = X_train, y = y_train)
 
-predictor <- Predictor$new(svm_model, data = X_train, y = y_train)
-
-imp <- FeatureImp$new(predictor, loss = "mae")
+imp <- FeatureImp$new(predictor, loss = "mse")
 
 plot(imp)
 
@@ -207,24 +266,27 @@ plot(effs)
 tree <- TreeSurrogate$new(predictor, maxdepth = 2)
 plot(tree)
 
+
+
 ```
+
+```{python}
+
+import pandas as pd
+
+pd.DataFrame(['Cazzo'])
+
+
+
+```
+
+
+
 
 ```{r}
 
 
-new_dataset = fread(file = "UNDICI.csv")
-new_data = new_dataset[,2:29]
-new_data = new_data[,-'Nation']
-new_data = new_data[,-'Producer']
-new_data = new_data[,-'Name']
-new_data = new_data[,-'year']
-new_data = new_data[,-'latitudine']
-new_data = new_data[,-'longitudine']
-new_data[,'local1'] = as.factor(new_data[['local1']], levels = levels(data[['local1']]))
-new_data[,'local1'] = c(new_data[,'local1'], data[,'local1'])[[2]][1:5]
 
-X_new = new_data[,-'score']
-y_new = new_data[,'score']
 
 lime.explain <- LocalModel$new(predictor, x.interest = X_new[1,])
 
@@ -233,8 +295,11 @@ lime.explain$results
 
 plot(lime.explain)
 
+caret::RMSE(as.matrix(predict(lm_model, X_new)), as.matrix(y_new))
 
-predict(svm_model, X_new)
+
+shapley <- Shapley$new(predictor, x.interest = X_new[1, ])
+shapley$plot()
 
 ```
 
